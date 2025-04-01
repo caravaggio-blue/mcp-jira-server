@@ -14,8 +14,9 @@ import path from "path";
 const JIRA_EMAIL = process.env.JIRA_EMAIL as string;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN as string;
 const JIRA_DOMAIN = process.env.JIRA_DOMAIN as string;
+const DEFAULT_PROJECT_KEY = process.env.DEFAULT_PROJECT_KEY as string;
 
-if (!JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_DOMAIN) {
+if (!JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_DOMAIN || !DEFAULT_PROJECT_KEY) {
   throw new Error(
     "JIRA_EMAIL, JIRA_API_TOKEN, and JIRA_DOMAIN environment variables are required"
   );
@@ -141,22 +142,6 @@ class JiraServer {
 - URL: https://${JIRA_DOMAIN}.atlassian.net/browse/${issue.key}`;
   }
 
-  private async loadProjectKey(workingDir: string): Promise<string> {
-    try {
-      const configPath = path.join(workingDir, ".jira-config.json");
-      const configContent = await fs.promises.readFile(configPath, "utf-8");
-      const config: JiraConfig = JSON.parse(configContent);
-      if (!config.projectKey) {
-        throw new Error("projectKey not found in .jira-config.json");
-      }
-      return config.projectKey;
-    } catch (error) {
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        "Failed to load project key from .jira-config.json. Please ensure the file exists and contains a valid projectKey."
-      );
-    }
-  }
 
   private setupToolHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -167,10 +152,6 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
               summary: {
                 type: "string",
                 description: "Issue summary/title",
@@ -184,7 +165,7 @@ class JiraServer {
                 description: "Issue type (Task, Epic, or Subtask)",
               },
             },
-            required: ["working_dir", "summary", "description", "type"],
+            required: ["summary", "description", "type"],
           },
         },
         {
@@ -193,17 +174,13 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
               status: {
                 type: "string",
                 description:
                   'Filter by status (e.g., "To Do", "In Progress", "Done")',
               },
             },
-            required: ["working_dir"],
+            required: [],
           },
         },
         {
@@ -212,10 +189,7 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
+              
               issue_key: {
                 type: "string",
                 description: "Issue key (e.g., PRJ-123)",
@@ -233,7 +207,7 @@ class JiraServer {
                 description: "New status",
               },
             },
-            required: ["working_dir", "issue_key"],
+            required: ["issue_key"],
           },
         },
         {
@@ -242,16 +216,12 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
               issue_key: {
                 type: "string",
                 description: "Issue key (e.g., PRJ-123)",
               },
             },
-            required: ["working_dir", "issue_key"],
+            required: ["issue_key"],
           },
         },
         {
@@ -260,16 +230,12 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
               issue_key: {
                 type: "string",
                 description: "Issue key (e.g., PRJ-123)",
               },
             },
-            required: ["working_dir", "issue_key"],
+            required: ["issue_key"],
           },
         },
         {
@@ -278,10 +244,6 @@ class JiraServer {
           inputSchema: {
             type: "object",
             properties: {
-              working_dir: {
-                type: "string",
-                description: "Working directory containing .jira-config.json",
-              },
               issue_key: {
                 type: "string",
                 description: "Issue key (e.g., PRJ-123)",
@@ -291,7 +253,21 @@ class JiraServer {
                 description: "Comment text to add to the issue",
               },
             },
-            required: ["working_dir", "issue_key", "comment"],
+            required: ["issue_key", "comment"],
+          },
+        },
+        {
+          name: "search_issues",
+          description: "Search issues using a custom JQL query",
+          inputSchema: {
+            type: "object",
+            properties: {
+              jql: {
+                type: "string",
+                description: "JQL query string (e.g., 'project = PROJ AND status = \"In Progress\" ORDER BY created DESC')",
+              }
+            },
+            required: ["jql"],
           },
         },
       ],
@@ -300,7 +276,7 @@ class JiraServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const { working_dir, ...args } = request.params.arguments as any;
-        this.currentProjectKey = await this.loadProjectKey(working_dir);
+        this.currentProjectKey = await DEFAULT_PROJECT_KEY;
 
         switch (request.params.name) {
           case "create_issue": {
@@ -388,6 +364,7 @@ class JiraServer {
                   "issuetype",
                   "created",
                   "creator",
+                  "assignee",
                 ],
               },
             });
@@ -490,6 +467,35 @@ class JiraServer {
                 {
                   type: "text",
                   text: `Comment added to issue ${issue_key}`,
+                },
+              ],
+            };
+          }
+
+          case "search_issues": {
+            const { jql } = args;
+
+            const searchResponse = await this.axiosInstance.get("/search", {
+              params: {
+                jql,
+                fields: [
+                  "summary",
+                  "status",
+                  "issuetype",
+                  "created",
+                  "updated",
+                  "creator",
+                  "reporter",
+                  "assignee"
+                ],
+              },
+            });
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: this.formatIssueList(searchResponse.data.issues),
                 },
               ],
             };
